@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
 import urllib.request
 import xml.etree.ElementTree as ET
+import io
 import re
 import sys
+import tarfile
 import email.utils
-from datetime import datetime
+from datetime import datetime, timezone
 
 FEED_URL = "https://community.ui.com/rss/releases/UniFi-Network-Application/e6712595-81bb-4829-8e42-9e2630fabcfe"
 DOCKERFILE = "Dockerfile"
 README = "README.md"
+BUILD_SCRIPT = "docker-build.sh"
 
 
-def fetch(url: str) -> bytes:
-    req = urllib.request.Request(
-        url,
-        headers={"User-Agent": "Mozilla/5.0 (GitHub Actions UniFi Updater)"}
-    )
+def fetch(url: str, byte_range: str = "") -> bytes:
+    headers = {"User-Agent": "Mozilla/5.0 (GitHub Actions UniFi Updater)"}
+    if byte_range:
+        headers["Range"] = f"bytes={byte_range}"
+    req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=30) as resp:
         return resp.read()
 
@@ -105,6 +108,51 @@ def build_pkgurl(version: str) -> str:
     return f"https://dl.ui.com/unifi/{version}/unifi_sysvinit_all.deb"
 
 
+def fetch_deb_control(url: str) -> str:
+    """
+    Read the control file of a remote .deb without downloading the whole package.
+    A .deb is an ar archive whose second member is control.tar.*, so only the
+    first few hundred KB are needed.
+    """
+    head = fetch(url, "0-131")
+    if not head.startswith(b"!<arch>\n"):
+        raise RuntimeError(f"{url} is not a .deb archive")
+    # Global header (8) + debian-binary header (60) + its 4-byte body, then the
+    # control member header: name(16) mtime(12) uid(6) gid(6) mode(8) size(10) magic(2)
+    member = head[72:132]
+    name = member[:16].decode().strip()
+    size = int(member[48:58].decode().strip())
+    if not name.startswith("control.tar"):
+        raise RuntimeError(f"Unexpected .deb layout: second member is {name!r}")
+    data = fetch(url, f"132-{132 + size - 1}")
+    with tarfile.open(fileobj=io.BytesIO(data)) as tar:
+        for m in tar.getmembers():
+            if m.name.lstrip("./") == "control":
+                return tar.extractfile(m).read().decode()
+    raise RuntimeError("control file not found in .deb")
+
+
+def required_java(control: str) -> str:
+    """Return the Java major version the package depends on, e.g. '25'."""
+    m = re.search(r"temurin-(\d+)-jre", control)
+    if not m:
+        raise RuntimeError("Could not find a temurin JRE dependency in the package")
+    return m.group(1)
+
+
+def update_build_script(java: str) -> None:
+    with open(BUILD_SCRIPT, "r", encoding="utf-8") as f:
+        src = f.read()
+
+    new_src, subs = re.subn(r"temurin-\d+-jre", f"temurin-{java}-jre", src)
+    if subs == 0:
+        raise RuntimeError(f"Failed to find the temurin JRE in {BUILD_SCRIPT}")
+
+    if new_src != src:
+        with open(BUILD_SCRIPT, "w", encoding="utf-8") as f:
+            f.write(new_src)
+
+
 def update_dockerfile(url: str) -> None:
     with open(DOCKERFILE, "r", encoding="utf-8") as f:
         src = f.read()
@@ -157,10 +205,13 @@ def main() -> None:
 
     version = rel["version"]
     link = rel["link"]
-    date_str = rel["date"] or datetime.now(timezone.utc)
+    date_str = rel["date"] or datetime.now(timezone.utc).date().isoformat()
 
     pkg_url = build_pkgurl(version)
 
+    # Keep the JRE in step with what the package requires, otherwise the
+    # build fails when UniFi moves to a newer Java.
+    update_build_script(required_java(fetch_deb_control(pkg_url)))
     update_dockerfile(pkg_url)
     update_readme(version, date_str, link)
 

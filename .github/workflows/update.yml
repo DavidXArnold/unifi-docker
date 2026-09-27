@@ -16,12 +16,11 @@ permissions:
 jobs:
   update-unifi:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+        uses: actions/checkout@v6
 
       - name: Run update script
         id: update
@@ -59,6 +58,7 @@ jobs:
             - Version: **${{ steps.update.outputs.version }}**
             - Updated:
               - `Dockerfile` (`ARG PKGURL`)
+              - `docker-build.sh` (Temurin JRE, if the required Java version changed)
               - `README.md` Current Information table
           labels: |
             automated
