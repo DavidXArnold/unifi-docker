@@ -156,10 +156,11 @@ For Unifi-in-Docker, this uses the most recent stable version.
 
 ### multiarch
 
-All available containers now support multiarch with `amd64`, `armhf`, and `arm64` builds included.
-`armhf` for now uses mongodb 3.4, I do not see much of a path forward for `armhf` due
-to the lack of mongodb support for 32 bit arm, but I will
-support it as long as feasibly possible, for now that date seems to be expiration of support for ubuntu 18.04.
+Images are built for `amd64` and `arm64`.
+UniFi Network 7.5 and later only supports 64-bit systems, so there is no `armhf` build.
+
+Current images run UniFi on Java 25 (Eclipse Temurin) with the bundled MongoDB 3.6.
+If you use an external MongoDB (`DB_URI`), UniFi 10.6 accepts versions 3.6 up to, but not including, 8.1.
 
 ## Adopting Access Points and Unifi Devices
 
