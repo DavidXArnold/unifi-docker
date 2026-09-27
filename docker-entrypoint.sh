@@ -166,11 +166,11 @@ then
 fi
 
 # controller writes to relative path logs/server.log
-cd ${BASEDIR}
+cd "${BASEDIR}" || exit 1
 
 CUID=$(id -u)
 
-if [[ "${@}" == "unifi" ]]; then
+if [[ "$*" == "unifi" ]]; then
     # keep attached to shell so we can wait on it
     log 'Starting unifi controller service.'
     for dir in "${DATADIR}" "${LOGDIR}"; do
@@ -215,7 +215,7 @@ if [[ "${@}" == "unifi" ]]; then
     wait
     log "WARN: unifi service process ended without being signaled? Check for errors in ${LOGDIR}." >&2
 else
-    log "Executing: ${@}"
-    exec ${@}
+    log "Executing: $*"
+    exec "$@"
 fi
 exit 1
