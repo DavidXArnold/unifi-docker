@@ -1,77 +1,196 @@
-name: Publish Docker image
+name: Docker image
+
 on:
+  pull_request:
   push:
     branches:
+      - 'main'
       - 'master'
       - 'beta'
-      - 'hotfix/*'
+      - 'hotfix/**'
     tags:
       - 'v*.*.*'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
 
 env:
-  TEST_TAG: jacobalberty/unifi:test
-  PKGURL: https://dl.ui.com/unifi/6.5.55/unifi_sysvinit_all.deb
+  # Images always go to GHCR. To also publish to Docker Hub, set the DOCKERHUB_IMAGE
+  # repository variable (e.g. jacobalberty/unifi) and the DOCKERHUB_USERNAME and
+  # DOCKERHUB_TOKEN secrets.
+  DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE }}
+  PUSH: ${{ github.event_name != 'pull_request' }}
 
 jobs:
+  # Each platform builds on a native runner, so nothing runs under QEMU emulation.
   build:
-    runs-on: ubuntu-latest
+    name: build (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: all
+
+      - name: Prepare
+        id: prep
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          names="ghcr.io/${GITHUB_REPOSITORY,,}"
+          [ -z "${DOCKERHUB_IMAGE}" ] || names="${names},docker.io/${DOCKERHUB_IMAGE}"
+          echo "names=${names}" >> "$GITHUB_OUTPUT"
+          echo "pair=${PLATFORM//\//-}" >> "$GITHUB_OUTPUT"
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-      - name: Login to GitHub Container Resgistry
+
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          provenance: false
+          load: true
+          tags: unifi:test
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ steps.prep.outputs.pair }}
+          cache-to: type=gha,mode=max,scope=${{ steps.prep.outputs.pair }}
+
+      - name: Smoke test
+        run: .github/scripts/smoke-test.sh unifi:test
+
+      - name: Login to GitHub Container Registry
+        if: env.PUSH == 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Login to DockerHub
-        uses: docker/login-action@v3 
+
+      - name: Login to Docker Hub
+        if: env.PUSH == 'true' && env.DOCKERHUB_IMAGE != ''
+        uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Build and export to Docker
+
+      # Reuses the layers from the Build step, so this only uploads.
+      - name: Push by digest
+        id: push
+        if: env.PUSH == 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
-          load: true
-          tags: ${{ env.TEST_TAG }}
-      - name: Test image
+          platforms: ${{ matrix.platform }}
+          provenance: false
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,"name=${{ steps.prep.outputs.names }}",push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ steps.prep.outputs.pair }}
+
+      - name: Export digest
+        if: env.PUSH == 'true'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
         run: |
-          export PKGURL=${{env.PKGURL}} &&
-          docker run -d --env PKGURL --rm --name unifitest ${{env.TEST_TAG}} &&
-          sleep 35 &&
-          for i in $(seq 1 10); do [ $(docker inspect --format='{{json .State.Health.Status}}' unifitest ) == \"healthy\" ] && break ||  sleep 35; done &&
-          [ $(docker inspect --format='{{json .State.Health.Status}}' unifitest ) == \"healthy\" ] &&
-          docker stop unifitest
-      - name: Extract metadata (tags, labels) for Docker
+          mkdir -p "${{ runner.temp }}/digests"
+          touch "${{ runner.temp }}/digests/${DIGEST#sha256:}"
+
+      - name: Upload digest
+        if: env.PUSH == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ steps.prep.outputs.pair }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Stitches the per-platform images into one multi-arch tag set.
+  merge:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Prepare
+        id: prep
+        run: |
+          {
+            echo "images<<EOF"
+            echo "ghcr.io/${GITHUB_REPOSITORY,,}"
+            [ -z "${DOCKERHUB_IMAGE}" ] || echo "docker.io/${DOCKERHUB_IMAGE}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to Docker Hub
+        if: env.DOCKERHUB_IMAGE != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
+          images: ${{ steps.prep.outputs.images }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=semver,pattern=v{{version}}
-            type=semver,pattern=v{{major}}
             type=semver,pattern=v{{major}}.{{minor}}
+            type=semver,pattern=v{{major}}
             type=ref,event=branch
-          images: |
-            jacobalberty/unifi
-            ghcr.io/${{ github.repository }}
-      - name: Build container image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          provenance: false
-          platforms: linux/arm64/v8,linux/amd64
-          push: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }} 
-      - name: Image digest
-        run: echo ${{ steps.docker_build.outputs.digest }}
+
+      - name: Create manifest lists and push
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          IMAGES: ${{ steps.prep.outputs.images }}
+        run: |
+          for image in ${IMAGES}; do
+            mapfile -t tags < <(jq -r --arg img "${image}" '.tags[] | select(startswith($img + ":")) | "-t", .' <<< "${DOCKER_METADATA_OUTPUT_JSON}")
+            refs=()
+            for digest in *; do refs+=("${image}@sha256:${digest}"); done
+            docker buildx imagetools create "${tags[@]}" "${refs[@]}"
+          done
+
+      - name: Inspect image
+        run: docker buildx imagetools inspect "ghcr.io/${GITHUB_REPOSITORY,,}:${{ steps.meta.outputs.version }}"
