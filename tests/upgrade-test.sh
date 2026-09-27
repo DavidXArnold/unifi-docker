@@ -31,9 +31,18 @@ echo "${FROM_IMAGE}: created database at version ${from_version}"
 "${DOCKER}" run -d --name "${new}" -v "${vol}:/unifi" "${IMAGE}" >/dev/null
 wait_for_controller "${new}"
 
+# The HTTPS port opens before startup (and the migration) finishes, so wait
+# for the database version to move rather than reading it once.
 want=$("${DOCKER}" run --rm --entrypoint dpkg-query "${IMAGE}" -W -f '${Version}' unifi | cut -d- -f1)
-got=$("${DOCKER}" exec "${new}" cat /unifi/data/db/version)
-[ "${got}" = "${want}" ] || { dump_logs "${new}"; fail "database is at ${got}, expected ${want}"; exit 1; }
+start=${SECONDS}
+until got=$("${DOCKER}" exec "${new}" cat /unifi/data/db/version 2>/dev/null) && [ "${got}" = "${want}" ]; do
+    if (( SECONDS - start >= TIMEOUT )); then
+        dump_logs "${new}"
+        fail "database is at ${got:-unknown}, expected ${want} after ${TIMEOUT}s"
+        exit 1
+    fi
+    sleep 5
+done
 echo "${IMAGE}: migrated database ${from_version} -> ${got}"
 
 assert_clean_shutdown "${IMAGE}" "${new}" "${vol}"
