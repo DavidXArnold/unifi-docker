@@ -368,6 +368,19 @@ This document describes everything you need to get Unifi-in-Docker running.
 The [Side Projects and Background Info](https://github.com/jacobalberty/unifi-docker/blob/master/Side-Projects.md) page
 provides more about what we've learned while developing Unifi-in-Docker.
 
+## Building and Testing
+
+```bash
+docker build -t unifi:test .
+tests/smoke-test.sh unifi:test                                      # image contents, run modes, shutdown, certificates
+tests/upgrade-test.sh jacobalberty/unifi:v10.0.162 unifi:test       # upgrade an existing install
+python3 -m unittest discover -s tests                               # update-workflow unit tests
+```
+
+The container tests use `docker` by default; set `DOCKER=podman` (or `nerdctl`) to use another CLI.
+CI runs all of these for every push and pull request, and only publishes images from
+`main`, `master`, `beta`, `hotfix/*` and `v*` tags.
+
 ## TODO
 
 This list is empty for now, please [add your suggestions](https://github.com/jacobalberty/unifi-docker/issues).
