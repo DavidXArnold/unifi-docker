@@ -8,10 +8,6 @@ if ! validate; then
   exit 1
 fi
 
-if [ -x /usr/local/bin/docker-build.sh ]; then
-    /usr/local/bin/docker-build.sh "${PKGURL}"
-fi
-
 exit_handler() {
     log "Exit signal received, shutting down"
     java -jar ${BASEDIR}/lib/ace.jar stop
@@ -38,10 +34,6 @@ trap 'kill ${!}; exit_handler' SIGHUP SIGINT SIGQUIT SIGTERM
 # vars similar to those found in unifi.init
 MONGOPORT=27117
 
-CODEPATH=${BASEDIR}
-DATALINK=${BASEDIR}/data
-LOGLINK=${BASEDIR}/logs
-RUNLINK=${BASEDIR}/run
 
 DIRS="${RUNDIR} ${LOGDIR} ${DATADIR} ${BASEDIR}"
 
@@ -53,9 +45,8 @@ JVM_MAX_HEAP_SIZE=${JVM_MAX_HEAP_SIZE:-1024M}
 #ENABLE_UNIFI=yes
 
 
-MONGOLOCK="${DATAPATH}/db/mongod.lock"
-JVM_EXTRA_OPTS="${JVM_EXTRA_OPTS} --add-opens=java.base/java.time=ALL-UNNAMED -Dunifi.datadir=${DATADIR} -Dunifi.logdir=${LOGDIR} -Dunifi.rundir=${RUNDIR}"
-PIDFILE=/var/run/unifi/unifi.pid
+MONGOLOCK="${DATADIR}/db/mongod.lock"
+JVM_EXTRA_OPTS="${JVM_EXTRA_OPTS} --add-opens=java.base/java.time=ALL-UNNAMED --enable-native-access=ALL-UNNAMED -Dunifi.datadir=${DATADIR} -Dunifi.logdir=${LOGDIR} -Dunifi.rundir=${RUNDIR}"
 
 if [ ! -z "${JVM_MAX_HEAP_SIZE}" ]; then
   JVM_EXTRA_OPTS="${JVM_EXTRA_OPTS} -Xmx${JVM_MAX_HEAP_SIZE}"
