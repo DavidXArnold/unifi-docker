@@ -48,6 +48,7 @@ test_run_mode() {
 
     "${DOCKER}" run -d --name "${ctr}" -v "${vol}:/unifi" "$@" "${IMAGE}" >/dev/null
     wait_for_controller "${ctr}"
+    wait_for_healthy "${ctr}"
     assert_clean_shutdown "${IMAGE}" "${ctr}" "${vol}"
 
     cleanup_container "${ctr}"

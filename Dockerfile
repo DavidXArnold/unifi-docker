@@ -20,6 +20,8 @@ ARG DEBIAN_FRONTEND=noninteractive
 
 ARG PKGURL=https://dl.ui.com/unifi/10.6.106/unifi_sysvinit_all.deb
 
+# CERT_PRIVATE_NAME is the key's file name, not a secret
+# hadolint ignore=DL3064
 ENV BASEDIR=/usr/lib/unifi \
     DATADIR=/unifi/data \
     LOGDIR=/unifi/log \
@@ -60,7 +62,7 @@ EXPOSE 6789/tcp 8080/tcp 8443/tcp 8880/tcp 8843/tcp 3478/udp 10001/udp
 
 WORKDIR /unifi
 
-HEALTHCHECK --start-period=5m CMD /usr/local/bin/docker-healthcheck.sh || exit 1
+HEALTHCHECK --start-period=5m CMD ["/usr/local/bin/docker-healthcheck.sh"]
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 

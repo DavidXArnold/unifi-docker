@@ -43,6 +43,27 @@ wait_for_controller() {
     fail "${ctr}: controller not up after ${TIMEOUT}s"
 }
 
+# Wait for Docker's own HEALTHCHECK to report healthy (what compose's
+# service_healthy relies on). Skipped for CLIs that don't evaluate HEALTHCHECK.
+wait_for_healthy() {
+    local ctr="$1" status
+    status=$("${DOCKER}" inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "${ctr}" 2>/dev/null || true)
+    if [ -z "${status}" ]; then
+        echo "${ctr}: ${DOCKER} does not report HEALTHCHECK status, skipping"
+        return 0
+    fi
+    local start=${SECONDS}
+    while (( SECONDS - start < TIMEOUT )); do
+        status=$("${DOCKER}" inspect -f '{{.State.Health.Status}}' "${ctr}")
+        if [ "${status}" = "healthy" ]; then
+            echo "${ctr}: HEALTHCHECK healthy after $(( SECONDS - start ))s"
+            return 0
+        fi
+        sleep 5
+    done
+    fail "${ctr}: HEALTHCHECK still ${status} after ${TIMEOUT}s"
+}
+
 # Run a command in a throwaway container of IMAGE with VOLUME mounted on /unifi.
 in_volume() {
     local image="$1" volume="$2"; shift 2
