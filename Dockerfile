@@ -1,8 +1,16 @@
-FROM golang:1.24-bullseye AS permset
+# syntax=docker/dockerfile:1
+
+# Cross-compiled on the build host, so multi-arch builds don't run Go under emulation
+FROM --platform=$BUILDPLATFORM golang:1.24-bookworm AS permset
+ARG TARGETOS TARGETARCH
+ARG PERMSET_REF=590a2e6c219db3304240ebb2d9cadfaf31400c3b
 WORKDIR /src
-RUN git clone https://github.com/jacobalberty/permset.git /src && \
-    mkdir -p /out && \
-    go build -ldflags "-X main.chownDir=/unifi" -o /out/permset
+RUN git init -q . && \
+    git fetch -q --depth 1 https://github.com/jacobalberty/permset.git "${PERMSET_REF}" && \
+    git checkout -q FETCH_HEAD && \
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -trimpath -ldflags "-s -w -X main.chownDir=/unifi" -o /out/permset && \
+    chmod 4755 /out/permset
 
 FROM ubuntu:20.04
 
@@ -23,55 +31,28 @@ ENV BASEDIR=/usr/lib/unifi \
     CERTNAME=cert.pem \
     CERT_PRIVATE_NAME=privkey.pem \
     CERT_IS_CHAIN=false \
-    GOSU_VERSION=1.10 \
     BIND_PRIV=true \
     RUNAS_UID0=true \
     UNIFI_GID=999 \
     UNIFI_UID=999
 
-# Install gosu
-# https://github.com/tianon/gosu/blob/master/INSTALL.md
-# This should be integrated with the main run because it duplicates a lot of the steps there
-# but for now while shoehorning gosu in it is seperate
-RUN set -eux; \
-	apt-get update; \
-	apt-get install -y gosu; \
-	rm -rf /var/lib/apt/lists/*
-
-RUN mkdir -p /usr/unifi \
-     /usr/local/unifi/init.d \
-     /usr/unifi/init.d \
-     /usr/local/docker
-COPY docker-entrypoint.sh /usr/local/bin/
-COPY docker-healthcheck.sh /usr/local/bin/
-COPY docker-build.sh /usr/local/bin/
-COPY functions /usr/unifi/functions
-COPY import_cert /usr/unifi/init.d/
-COPY pre_build /usr/local/docker/pre_build
-RUN chmod +rx /usr/local/bin/docker-entrypoint.sh \
- && chmod +rx /usr/unifi/init.d/import_cert \
- && chmod +r  /usr/unifi/functions \
- && chmod +rx /usr/local/bin/docker-healthcheck.sh \
- && chmod +rx /usr/local/bin/docker-build.sh \
- && chmod -R +rx /usr/local/docker/pre_build
-
-# Push installing openjdk-8-jre first, so that the unifi package doesn't pull in openjdk-7-jre as a dependency? Else uncomment and just go with openjdk-7.
-RUN set -ex \
- && mkdir -p /usr/share/man/man1/ \
+# The heavy install layer comes first so that editing the scripts below
+# doesn't invalidate it.
+RUN --mount=type=bind,source=docker-build.sh,target=/tmp/build/docker-build.sh \
+    set -ex \
  && groupadd -r unifi -g $UNIFI_GID \
  && useradd --no-log-init -r -u $UNIFI_UID -g $UNIFI_GID unifi \
- && /usr/local/bin/docker-build.sh "${PKGURL}"
+ && bash /tmp/build/docker-build.sh "${PKGURL}"
 
+# Plain COPY keeps the setuid bit set in the build stage
 COPY --from=permset /out/permset /usr/local/bin/permset
-RUN chown 0.0 /usr/local/bin/permset && \
-    chmod +s /usr/local/bin/permset
-
-RUN mkdir -p /unifi && chown unifi:unifi -R /unifi
+COPY --chmod=0755 docker-entrypoint.sh docker-healthcheck.sh /usr/local/bin/
+COPY --chmod=0644 functions /usr/unifi/functions
+COPY --chmod=0755 import_cert /usr/unifi/init.d/
 
 # Apply any hotfixes that were included
-COPY hotfixes /usr/local/unifi/hotfixes
-
-RUN chmod +x /usr/local/unifi/hotfixes/* && run-parts /usr/local/unifi/hotfixes
+COPY --chmod=0755 hotfixes /usr/local/unifi/hotfixes
+RUN run-parts /usr/local/unifi/hotfixes
 
 VOLUME ["/unifi", "${RUNDIR}"]
 
@@ -81,12 +62,6 @@ WORKDIR /unifi
 
 HEALTHCHECK --start-period=5m CMD /usr/local/bin/docker-healthcheck.sh || exit 1
 
-# execute controller using JSVC like original debian package does
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
 CMD ["unifi"]
-
-# execute the conroller directly without using the service
-#ENTRYPOINT ["/usr/bin/java", "-Xmx${JVM_MAX_HEAP_SIZE}", "-jar", "/usr/lib/unifi/lib/ace.jar"]
-  # See issue #12 on github: probably want to consider how JSVC handled creating multiple processes, issuing the -stop instraction, etc. Not sure if the above ace.jar class gracefully handles TERM signals.
-#CMD ["start"]

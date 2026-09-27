@@ -1,67 +1,59 @@
 #!/usr/bin/env bash
+# Installs the UniFi Network Application and its runtime into the image.
+# Bind-mounted by the Dockerfile at build time, so it never ends up in the image.
 
-# fail on error
-set -e
+set -euo pipefail
 
-# Retry 5 times with a wait of 10 seconds between each retry
-tryfail() {
-    for i in $(seq 1 5);
-        do [ $i -gt 1 ] && sleep 10; $* && s=0 && break || s=$?; done;
-    (exit $s)
-}
+PKGURL="${1:?usage: docker-build.sh PKGURL}"
+ARCH="$(dpkg --print-architecture)"
 
-# Try multiple keyservers in case of failure
-addKey() {
-    for server in $(shuf -e ha.pool.sks-keyservers.net \
-        hkp://p80.pool.sks-keyservers.net:80 \
-        keyserver.ubuntu.com \
-        hkp://keyserver.ubuntu.com:80 \
-        pgp.mit.edu) ; do \
-        if apt-key adv --keyserver "$server" --recv "$1"; then
-            exit 0
-        fi
-    done
-    return 1
-}
-
-if [ "x${1}" == "x" ]; then
-    echo please pass PKGURL as an environment variable
-    exit 0
-fi
+# Keep files the controller never uses out of the image. dpkg skips these paths
+# for every package installed below, so they are never written to the layer.
+case "${ARCH}" in
+    amd64) OTHER_NATIVE=aarch64 ;;
+    arm64) OTHER_NATIVE=x86_64 ;;
+    *)     OTHER_NATIVE=none ;;
+esac
+cat > /etc/dpkg/dpkg.cfg.d/01-unifi-docker-excludes <<EOF
+path-exclude=/usr/share/doc/*
+path-include=/usr/share/doc/*/copyright
+path-exclude=/usr/share/man/*
+path-exclude=/usr/share/info/*
+path-exclude=/usr/share/locale/*
+path-exclude=/usr/share/lintian/*
+path-exclude=/usr/bin/mongoperf
+path-exclude=/usr/bin/mongos
+path-exclude=/usr/lib/unifi/lib/native/Linux/${OTHER_NATIVE}/*
+EOF
+# Some JRE postinst scripts expect this to exist
+mkdir -p /usr/share/man/man1
 
 apt-get update
 apt-get install -qy --no-install-recommends \
-    apt-transport-https \
     ca-certificates \
     curl \
-    dirmngr \
-    gpg \
-    gpg-agent \
-    procps \
+    gosu \
     libcap2-bin \
+    procps \
     tzdata
 
-# Ubuntu 20.04's own archives don't ship a JRE new enough for current UniFi
-# releases (10.6.x requires Java 25), so pull it from Eclipse Adoptium instead.
+# UniFi pins a specific Java release (the updater workflow keeps the temurin
+# package below in step with it), so pull the JRE from Eclipse Adoptium.
+# 20.04 is kept as the base because it is the last Ubuntu release that packages
+# mongodb-server, which the UniFi package depends on.
 mkdir -p /etc/apt/keyrings
-curl -fsSL https://packages.adoptium.net/artifactory/api/gpg/key/public | gpg --dearmor -o /etc/apt/keyrings/adoptium.gpg
-echo "deb [signed-by=/etc/apt/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb $(awk -F= '/^VERSION_CODENAME/{print $2}' /etc/os-release) main" \
-    | tee /etc/apt/sources.list.d/adoptium.list
+curl -fsSL https://packages.adoptium.net/artifactory/api/gpg/key/public -o /etc/apt/keyrings/adoptium.asc
+echo "deb [signed-by=/etc/apt/keyrings/adoptium.asc] https://packages.adoptium.net/artifactory/deb $(. /etc/os-release && echo "${VERSION_CODENAME}") main" \
+    > /etc/apt/sources.list.d/adoptium.list
 apt-get update
-apt-get install -qy --no-install-recommends temurin-25-jre
 
-echo 'deb https://www.ui.com/downloads/unifi/debian stable ubiquiti' | tee /etc/apt/sources.list.d/100-ubnt-unifi.list
-tryfail apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv 06E85760C0A52C50
-
-if [ -d "/usr/local/docker/pre_build/$(dpkg --print-architecture)" ]; then
-    find "/usr/local/docker/pre_build/$(dpkg --print-architecture)" -type f -exec '{}' \;
-fi
-
-curl -L -o ./unifi.deb "${1}"
-apt -qy install ./unifi.deb
-rm -f ./unifi.deb
+curl -fsSL -o /tmp/unifi.deb "${PKGURL}"
+apt-get install -qy --no-install-recommends temurin-25-jre /tmp/unifi.deb
+rm -f /tmp/unifi.deb
 chown -R unifi:unifi /usr/lib/unifi
-rm -rf /var/lib/apt/lists/*
+
+apt-get clean
+rm -rf /var/lib/apt/lists/* /var/log/apt /var/log/dpkg.log /var/cache/debconf/*-old /tmp/hsperfdata_*
 
 rm -rf ${ODATADIR} ${OLOGDIR} ${ORUNDIR} ${BASEDIR}/data ${BASEDIR}/run ${BASEDIR}/logs
 mkdir -p ${DATADIR} ${LOGDIR} ${RUNDIR}
@@ -74,4 +66,5 @@ ln -s ${RUNDIR} ${ORUNDIR}
 mkdir -p /var/cert ${CERTDIR}
 ln -s ${CERTDIR} /var/cert/unifi
 
-rm -rf "${0}"
+mkdir -p /usr/unifi/init.d /usr/local/unifi/init.d
+chown -R unifi:unifi /unifi

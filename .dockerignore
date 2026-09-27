@@ -1,0 +1,8 @@
+# Only send what the Dockerfile actually uses
+*
+!docker-build.sh
+!docker-entrypoint.sh
+!docker-healthcheck.sh
+!functions
+!import_cert
+!hotfixes
